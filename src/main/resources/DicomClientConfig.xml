@@ -17,10 +17,10 @@
    limitations under the License.
 -->
 
-    <!-- URL for the service. -->
-    <DicomServiceUrl>https://172.20.125.41:8091</DicomServiceUrl>        <!-- rolxdeploy1 -->
-    <!-- <DicomServiceUrl>https://141.214.124.240:8091</DicomServiceUrl> -->  <!-- rolxdev1 -->
-    <!-- <DicomServiceUrl>https://141.214.125.70:8091</DicomServiceUrl> -->    <!-- irrer desktop -->
+    <!-- URL for the DICOM service used for authenticating and authorizing users.  If
+    this is not specified, then no authentication or authorization will be done, and
+    any user may upload DICOM files. -->
+    <!-- <DicomServiceUrl>https://localhost:8091</DicomServiceUrl> -->
 
     <!-- Used to generate the default patient id.  Special character meanings:
         * : a random (capital) alpha or digit : ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789
@@ -41,29 +41,31 @@
 
     <!-- When generating UIDs for anonymization, this prefix is used.   If not specified, a default is used.
     Note that a value of 1.3.6.1.4.1.22361. is for University of Michigan Department of Radiation Oncology. -->
-    <RootGuid>1.3.6.1.4.1.22361.</RootGuid>
+    <RootUid>1.3.6.1.4.1.22361.</RootUid>
 
     <!-- If true, upload help is shown.  It makes sense to not show the upload help for sites where the server is not installed. -->
     <ShowUploadHelp>true</ShowUploadHelp>
 
-    <!-- If true, enable internal profiling.  Setting this to true is only useful for diagnosing performance problems. -->
-    <Profile>false</Profile>
+    <!-- When using aggressive anonymization, if DICOM field contains any one of these characters, then it is not considered PHI. 
+    For example, if this field is 0123456789, and a DICOM field is TEST5, then it would not be anonymized because it contains the
+    character '5'.  This is an attempt to fix operational problems with aggressive anonymization where a patient name was already
+    anonymized to 123, and then a subsequent anonymization anonymized all occurrences of 123, which wreaked havoc on UIDs.
+    
+    If this value is not specified in this config file, then it defaults to:
 
-    <!-- Location of java keystore file.  If this value is specified by the
-    system property javax.net.ssl.trustStore then the system property will
-    override these entries.  Multiple entries indicate that
-    multiple locations should be tried in the given order. -->
-    <javax.net.ssl.trustStore>dicomsvc.jks</javax.net.ssl.trustStore>
-    <javax.net.ssl.trustStore>src/main/resources/dicomsvc.jks</javax.net.ssl.trustStore>
-    <javax.net.ssl.trustStore>C:\Program Files\UMRO\dicomsvc\dicomsvc.jks</javax.net.ssl.trustStore>
+        0123456789$%
+
+    -->
+    <PhiDisqualifyingCharacters>0123456789$%</PhiDisqualifyingCharacters>
 
    <!-- If a value is given, search all text fields for the for the original values in these fields and replace them with 'replacement'. -->
    <AggressiveAnonymization replacement='anon'>PatientName</AggressiveAnonymization>
    <AggressiveAnonymization replacement='anon'>PatientID</AggressiveAnonymization>
-   
+
    <!-- The following words will not be aggressively anonymized. -->
    <ReservedWordList>
         abdomen
+        anon
         anonymous
         auto
         axial
@@ -125,6 +127,7 @@
         lt_node
         lung
         lymph
+        medical
         mm
         monochrome
         mr
@@ -132,6 +135,7 @@
         neck
         node
         nodes
+        none
         only
         optext
         optext_pelv
@@ -173,6 +177,8 @@
         struct
         structure
         supine
+        system
+        systems
         target
         target_2mm
         template
@@ -182,6 +188,7 @@
         tumor
         tumor_1mm
         tumor_2mm
+        varian
         version
         vesicles
         volume
@@ -190,10 +197,10 @@
         xml
    </ReservedWordList>
 
-	<!-- List of tags whose contents should be anonymized.  Note that for UIDs, the replacement
-	value is ignored, and instead a new unique UID is constructed (with a Univ of Mich Radiation
-	Oncology prefix) -->
-	<AnonymizeDefaultList>
+    <!-- List of tags whose contents should be anonymized.  Note that for UIDs, the replacement
+    value is ignored, and instead a new unique UID is constructed (with a Univ of Mich Radiation
+    Oncology prefix) -->
+    <AnonymizeDefaultList>
         <Tag Name='PatientID'                           >11111111</Tag>
         <Tag Name='PatientName'                         ></Tag>
         <Tag Name='PatientBirthDate'                    >18000101</Tag>
@@ -214,16 +221,16 @@
         <Tag Name='ReferringPhysicianTelephoneNumbers'  >none</Tag>
         <Tag Name='ReferringPhysicianTelephoneNums'     >none</Tag>  <!-- check for shortened version also -->
         <Tag Name='StationName'                         >none</Tag>
-        <Tag Name='StudyDescription'                    >none</Tag>
-        <Tag Name='SeriesDescription'                   >none</Tag>
+   <!-- <Tag Name='StudyDescription'                    >none</Tag> -->
+   <!-- <Tag Name='SeriesDescription'                   >none</Tag> -->
         <Tag Name='InstitutionalDepartmentName'         >none</Tag>
         <Tag Name='PhysiciansOfRecord'                  >none</Tag>
         <Tag Name='PerformingPhysicianName'             >none</Tag>
         <Tag Name='NameOfPhysiciansReadingStudy'        >none</Tag>
         <Tag Name='OperatorsName'                       >none</Tag>
-        <Tag Name='AdmittingDiagnosesDescription'       >none</Tag>
+   <!-- <Tag Name='AdmittingDiagnosesDescription'       >none</Tag> -->
         <Tag Name='ReferencedSOPInstanceUID'            ></Tag>
-        <Tag Name='DerivationDescription'               >none</Tag>
+   <!-- <Tag Name='DerivationDescription'               >none</Tag> -->
         <Tag Name='MedicalRecordLocator'                >none</Tag>
         <Tag Name='EthnicGroup'                         >none</Tag>
         <Tag Name='Occupation'                          >none</Tag>
@@ -238,16 +245,16 @@
         <Tag Name='SynchronizationFrameOfReferenceUID'  ></Tag>
         <Tag Name='SynchronizationFrameOfRefUID'        ></Tag>   <!-- check for shortened version also -->
         <Tag Name='ImageComments'                       >none</Tag>
-        <Tag Name='RequestAttributesSequence'           ></Tag>
+        <!-- <Tag Name='RequestAttributesSequence'           ></Tag>  -->
         <Tag Name='UID'                                 ></Tag>
-        <Tag Name='ContentSequence'                     >remove</Tag>
+        <!-- <Tag Name='ContentSequence'                     >remove</Tag>  -->
         <Tag Name='StorageMediaFileSetUID'              ></Tag>
         <Tag Name='ReferencedFrameOfReferenceUID'       ></Tag>
         <Tag Name='RelatedFrameOfReferenceUID'          ></Tag>
         <Tag Name='RTPlanName'                          >none</Tag>  <!-- UMPlan sometimes puts patient info here -->
         <Tag Name='DoseReferenceUID'                    ></Tag>
         <Tag Name='ReferencedPrimaryDoseRefUID'         ></Tag>
-	</AnonymizeDefaultList>
+    </AnonymizeDefaultList>
 
     <!-- The following list defines private tags that are not in the DICOM standard.
     Modify this list as needed so that private tag data can be viewed and anonymized.
@@ -269,7 +276,7 @@
             <TypeOfData5010  group='5010' element='0020' vr='CS' fullName='Type Of Data 5010'/>
 
     -->
-	<PrivateTagList>
+    <PrivateTagList>
 
         <!-- Varian private tags -->
         <ExtendedInterfaceData                      group='3253' element='1000' vr='OB' fullName='Varian XML Stream'/>
@@ -309,15 +316,15 @@
         <VarianCreator3291                          group='3291' element='0010' vr='LO' fullName='Varian Creator 3291'/>
         <SourceToGeneralAccessoryDist               group='3291' element='1000' vr='DS' fullName='Source To General Accessory Distance '/>
 
-        <CurveDimensions         group='5000:50fe:2' element='0005' vr='US' fullName='Curve Dimensions'         />
-        <NumberOfPoints          group='5000:50fe:2' element='0010' vr='US' fullName='Number Of Points'         />
-        <TypeOfData              group='5000:50fe:2' element='0020' vr='CS' fullName='Type Of Data'             />
-        <CurveDescription        group='5000:50fe:2' element='0022' vr='LO' fullName='Curve Description'        />
-        <AxisUnits               group='5000:50fe:2' element='0030' vr='SH' fullName='Axis Units'               />
-        <AxisLabels              group='5000:50fe:2' element='0040' vr='SH' fullName='Axis Labels'              />
-        <DataValueRepresentation group='5000:50fe:2' element='0103' vr='US' fullName='Data Value Representation'/>
-        <CurveLabel              group='5000:50fe:2' element='2500' vr='LO' fullName='Curve Label'              />
-        <CurveData               group='5000:50fe:2' element='3000' vr='OX' fullName='Curve Data'               />
+        <CurveDimensions                            group='5000:50fe:2' element='0005' vr='US' fullName='Curve Dimensions'         />
+        <NumberOfPoints                             group='5000:50fe:2' element='0010' vr='US' fullName='Number Of Points'         />
+        <TypeOfData                                 group='5000:50fe:2' element='0020' vr='CS' fullName='Type Of Data'             />
+        <CurveDescription                           group='5000:50fe:2' element='0022' vr='LO' fullName='Curve Description'        />
+        <AxisUnits                                  group='5000:50fe:2' element='0030' vr='SH' fullName='Axis Units'               />
+        <AxisLabels                                 group='5000:50fe:2' element='0040' vr='SH' fullName='Axis Labels'              />
+        <DataValueRepresentation                    group='5000:50fe:2' element='0103' vr='US' fullName='Data Value Representation'/>
+        <CurveLabel                                 group='5000:50fe:2' element='2500' vr='LO' fullName='Curve Label'              />
+        <CurveData                                  group='5000:50fe:2' element='3000' vr='OX' fullName='Curve Data'               />
 
-	</PrivateTagList>
+    </PrivateTagList>
 </DicomClientConfig>

@@ -22,6 +22,8 @@ import java.awt.Component;
 import java.awt.Container;
 import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
+import java.io.File;
+import java.util.ArrayList;
 
 import javax.swing.BorderFactory;
 import javax.swing.BoxLayout;
@@ -41,7 +43,7 @@ import javax.swing.text.PlainDocument;
 import com.pixelmed.dicom.AttributeList;
 import com.pixelmed.dicom.TagFromName;
 
-import edu.umro.dicom.common.Util;
+import edu.umro.dicom.client.DicomClient.ProcessingMode;
 import edu.umro.util.Log;
 
 /**
@@ -95,8 +97,8 @@ public class Patient extends JPanel implements Comparable<Patient>, DocumentList
     /** If selected, then patient name can be different from patient id. */
     private JCheckBox enableDifferentPatientName = null;
 
-    /** Button that anonymizes all series for this patient. */
-    private JButton anonymizePatientButton = null; 
+    /** Button that process all series for this patient. */
+    private JButton processPatientButton = null; 
 
     private JComponent buildAnonymizingPatientId(String anonymousPatientId) {
         JPanel mainPanel = new JPanel();
@@ -122,7 +124,7 @@ public class Patient extends JPanel implements Comparable<Patient>, DocumentList
         PlainDocument plainNameDocument = (PlainDocument)anonymizePatientNameTextField.getDocument();
         plainNameDocument.setDocumentFilter(new LimitedDocumentFilter(PATIENT_NAME_MAX_LEN));
         anonymizePatientNameTextField.setToolTipText("<html>The name to be used as<br>the anonymized patient name</html>");
-        // TODO needed? anonymizePatientNameTextField.getDocument().addDocumentListener(this);
+        anonymizePatientNameTextField.getDocument().addDocumentListener(this);
         anonymizePanel.add(anonymizePatientNameTextField);
 
         enableDifferentPatientName = new JCheckBox();
@@ -133,13 +135,17 @@ public class Patient extends JPanel implements Comparable<Patient>, DocumentList
         setDiffPatName();
 
         anonymizePanel.add(new JLabel("        "));
-        anonymizePatientButton = new JButton("Anonymize Patient");
-        anonymizePatientButton.setToolTipText("<html>Anonymize all series<br>for this patient</html>");
-        anonymizePatientButton.addActionListener(this);
-        anonymizePanel.add(anonymizePatientButton);
+        processPatientButton = new JButton("Anonymize Patient");
+        processPatientButton.setToolTipText("<html>Anonymize all series<br>for this patient</html>");
+        processPatientButton.addActionListener(this);
+        
+        JPanel betweenPanel = new JPanel();
+        betweenPanel.add(anonymizePanel);
+        betweenPanel.add(processPatientButton);
+        
 
         mainPanel.add(new JLabel(""), BorderLayout.CENTER);
-        mainPanel.add(anonymizePanel, BorderLayout.EAST);
+        mainPanel.add(betweenPanel, BorderLayout.EAST);
         return mainPanel;
     }
 
@@ -173,7 +179,7 @@ public class Patient extends JPanel implements Comparable<Patient>, DocumentList
      * could be derived from the file name, but it is more efficient to only
      * read and parse the file once.
      */
-    public Patient(String fileName, AttributeList attributeList, String anonymousPatientId) {
+    public Patient(File file, AttributeList attributeList, String anonymousPatientId) {
         patientId        = Util.getAttributeValue(attributeList, TagFromName.PatientID);
         patientId        = (patientId == null) ? "No patient id" : patientId;
         patientName      = Util.getAttributeValue(attributeList, TagFromName.PatientName); 
@@ -195,7 +201,7 @@ public class Patient extends JPanel implements Comparable<Patient>, DocumentList
         }
 
         patientSummary = " " + patientSummary + " ";
-        Log.get().info("Added patient: " + patientSummary);
+        Log.get().info("Added patient");
 
         Border titledBorder = BorderFactory.createTitledBorder(border, patientSummary, TitledBorder.LEFT,
                 TitledBorder.TOP , DicomClient.FONT_MEDIUM, DicomClient.COLOR_FONT);
@@ -211,16 +217,39 @@ public class Patient extends JPanel implements Comparable<Patient>, DocumentList
 
         add(buildPatientButtonPanel(anonymousPatientId));
 
-        Study study = new Study(fileName, attributeList);
+        Study study = new Study(file, attributeList);
         add(study);
     }
-
-
+    
+    
     /**
      * Set the mode (anonymize or upload) for this patient.
      */
-    public void setMode() {
-        anonymizePanel.setVisible(DicomClient.getInstance().getAnonymizeMode());
+    public void setMode(ProcessingMode mode) {
+        anonymizePanel.setVisible(mode != ProcessingMode.UPLOAD);
+        boolean uploadEnabled = DicomClient.getInstance().uploadEnabled();
+        boolean enabled = false;
+        String text = "?? Patient";
+        switch (mode) {
+        case ANONYMIZE:
+            text = "Anonymize Patient";
+            enabled = true;
+            break;
+        case ANONYMIZE_THEN_LOAD:
+            text = "Anonymize then Load Patient";
+            enabled = true;
+            break;
+        case UPLOAD:
+            text = "Upload Patient";
+            enabled = uploadEnabled;
+            break;
+        case ANONYMIZE_THEN_UPLOAD:
+            text = "Anonymize then Upload Patient";
+            enabled = uploadEnabled;
+            break;
+        }
+        processPatientButton.setEnabled(enabled);
+        processPatientButton.setText(text);
     }
 
 
@@ -231,19 +260,19 @@ public class Patient extends JPanel implements Comparable<Patient>, DocumentList
      * 
      * @param attributeList Representation of DICOM file.
      */
-    public void addStudy(String fileName, AttributeList attributeList) {
+    public void addStudy(File file, AttributeList attributeList) {
         String studyInstanceUid = Util.getAttributeValue(attributeList, TagFromName.StudyInstanceUID);
         studyInstanceUid = (studyInstanceUid == null) ? "" : studyInstanceUid;
         for (Component component : getComponents()) {
             if (component instanceof Study) {
                 Study study = (Study)component;
                 if (study.getStudyInstanceUID().equals(studyInstanceUid)) {
-                    study.addSeries(fileName, attributeList);
+                    study.addInstance(file, attributeList);
                     return;
                 }
             }
         }
-        add(new Study(fileName, attributeList));
+        add(new Study(file, attributeList));
     }
 
 
@@ -255,9 +284,15 @@ public class Patient extends JPanel implements Comparable<Patient>, DocumentList
     public boolean equals(Object other) {
         return (other != null) && (other instanceof Patient) && patientId.equals(((Patient)other).patientId);
     }
+    
+    /**
+     * Get the patient ID.
+     * @return
+     */
+    public String getPatientId() {
+        return patientId;
+    }
 
-
-    @Override
     public int compareTo(Patient other) {
         return patientId.compareTo(other.patientId);
     }
@@ -327,32 +362,48 @@ public class Patient extends JPanel implements Comparable<Patient>, DocumentList
 
 
     private void updateAnonymizePatientFields() {
-        if ((!enableDifferentPatientName.isSelected()) && (!getAnonymizePatientIdText().equals(getAnonymizePatientNameText()))) {
-            SwingUtilities.invokeLater(this);
+        SwingUtilities.invokeLater(this);
+    }
+
+
+    /**
+     * Set one of the special fields (anonymizing information is on
+     * patient panel, patient id and name) values in the anonymizing
+     * GUI so that they stay synchronized.
+     * 
+     * @param local
+     * @param tag
+     */
+    /*
+    private void setSpecialField(JTextField local, AttributeTag tag) {
+        AnonymizeAttribute aa = AnonymizeGUI.getInstance().getAnonymizeAttribute(tag);
+        if ((aa != null) && (!aa.getValue().equalsIgnoreCase(local.getText()))) {
+            aa.setValue(local.getText());
         }
     }
+    */
 
 
     public void run() {
-        if (!getAnonymizePatientIdText().equals(getAnonymizePatientNameText())) {
+        if ((!enableDifferentPatientName.isSelected()) && (!getAnonymizePatientIdText().equals(getAnonymizePatientNameText()))) {
             setAnonymizePatienteNameText(getAnonymizePatientIdText());
         }
+
+        //setSpecialField(anonymizePatientIdTextField, TagFromName.PatientID);
+        //setSpecialField(anonymizePatientNameTextField, TagFromName.PatientName);
     }
 
 
-    @Override
     public void insertUpdate(DocumentEvent e) {
         updateAnonymizePatientFields();
     }
 
 
-    @Override
     public void removeUpdate(DocumentEvent e) {
         updateAnonymizePatientFields();
     }
 
 
-    @Override
     public void changedUpdate(DocumentEvent e) {
         updateAnonymizePatientFields();
     }
@@ -364,39 +415,55 @@ public class Patient extends JPanel implements Comparable<Patient>, DocumentList
      */
     private void setDiffPatName() {
         anonymizePatientNameTextField.setEnabled(enableDifferentPatientName.isSelected());
-        anonymizePatientNameLabel.setEnabled(enableDifferentPatientName.isSelected());
+        anonymizePatientNameLabel.    setEnabled(enableDifferentPatientName.isSelected());
     }
 
 
-    private void processAll(Container container) {
+    private ArrayList<Series> getSeriesList(Container container, ArrayList<Series> seriesList) {
+        if (container == null) container = this;
+        if (seriesList == null) seriesList = new ArrayList<Series>();
         for (Component component : container.getComponents()) {
             if (component instanceof Series) {
-                ((Series)component).processSeries();
+                seriesList.add((Series)component);
             }
             if (component instanceof Container) {
-                processAll((Container)component);
+                getSeriesList((Container)component, seriesList);
             }
         }
-        DicomClient.getInstance().setProcessedStatus();
+        return seriesList;
+    }
+    
+    /**
+     * Get a list of all studies.
+     * 
+     * @return List of studies.
+     */
+    public ArrayList<Study> getStudyList() {
+        ArrayList<Study> list = new ArrayList<Study>();
+        for (Component component : getComponents()) {
+            if (component instanceof Study) {
+                list.add((Study) component);
+            }
+        }
+        return list;
     }
 
 
-    @Override
     public void actionPerformed(ActionEvent e) {
         if (e.getSource() == enableDifferentPatientName) {
             setDiffPatName();
             updateAnonymizePatientFields();
         }
 
-        if (e.getSource() == anonymizePatientButton) {
-            if (DicomClient.getInstance().ensureAnonymizeDirectoryExists()) {
-                Log.get().info("Anonymizing all series for patient " + this);
-                processAll(this);
-            }
+        if (e.getSource() == processPatientButton) {
+            Log.get().info("Processing all series for patient");
+            Series.processOk = true;
+            for (Series series : getSeriesList(null, null)) series.processSeries();
+            DicomClient.getInstance().setProcessedStatus();
         }
 
         if (e.getSource() == clearButton) {
-            Log.get().info("Clearing all series for patient " + this);
+            Log.get().info("Clearing all series for patient");
             DicomClient.getInstance().clearPatient(this);
         }
     }

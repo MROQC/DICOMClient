@@ -23,20 +23,15 @@ import java.awt.Component;
 import java.awt.Graphics;
 import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
-import java.awt.image.BufferedImage;
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
 import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileNotFoundException;
 import java.io.IOException;
-import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Collections;
 import java.util.HashSet;
+import java.util.TreeSet;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
 
-import javax.imageio.ImageIO;
 import javax.swing.BorderFactory;
 import javax.swing.Icon;
 import javax.swing.JButton;
@@ -45,53 +40,31 @@ import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.JProgressBar;
 import javax.xml.parsers.ParserConfigurationException;
-
-import org.restlet.Client;
-import org.restlet.Request;
-import org.restlet.Response;
-import org.restlet.data.MediaType;
-import org.restlet.data.Method;
-import org.restlet.data.Protocol;
-import org.restlet.data.Reference;
-import org.restlet.data.Status;
-import org.restlet.representation.InputRepresentation;
-import org.restlet.representation.Representation;
-import org.restlet.resource.ResourceException;
-import org.w3c.dom.Document;
-
 import com.pixelmed.dicom.Attribute;
 import com.pixelmed.dicom.AttributeFactory;
 import com.pixelmed.dicom.AttributeList;
+import com.pixelmed.dicom.AttributeTag;
 import com.pixelmed.dicom.DicomException;
-import com.pixelmed.dicom.DicomOutputStream;
 import com.pixelmed.dicom.FileMetaInformation;
 import com.pixelmed.dicom.SOPClassDescriptions;
+import com.pixelmed.dicom.SetOfDicomFiles;
 import com.pixelmed.dicom.TagFromName;
-import com.pixelmed.dicom.TransferSyntax;
-import com.pixelmed.dicom.XMLRepresentationOfDicomObjectFactory;
-import com.pixelmed.display.ConsumerFormatImageMaker;
-
-import edu.umro.dicom.common.Anonymize;
-import edu.umro.dicom.common.Util;
+import edu.umro.dicom.client.DicomClient.ProcessingMode;
+import edu.umro.dicom.client.test.AutoTest;
 import edu.umro.util.Log;
 import edu.umro.util.UMROException;
-import edu.umro.util.Utility;
-import edu.umro.util.XML;
 
 /**
  * Represent a DICOM series.
  * 
- * @author Jim Irrer  irrer@umich.edu
- *
+ * @author Jim Irrer irrer@umich.edu
+ * 
  */
 
-public class Series extends JPanel implements ActionListener {
+public class Series extends JPanel implements ActionListener, Runnable {
 
     /** Default ID. */
     private static final long serialVersionUID = 1L;
-
-    /** Suffix for creating DICOM files. */
-    private static final String DICOM_SUFFIX = ".DCM";
 
     /** Card layout identifier for preview slider mode. */
     static private final String CARD_SLIDER = "Slider";
@@ -103,10 +76,10 @@ public class Series extends JPanel implements ActionListener {
     private static final String UPLOAD_BUTTON_TOOLTIP_TEXT_ENABLED = "<html>Upload this series<br>to the selected<br>PACS server.</html>";
 
     /** Tool tip for Upload All button. */
-    private static final String UPLOAD_BUTTON_TOOLTIP_TEXT_DISABLED = "<html>Log in and Select a PACS<br>server to enable uploading.</html>";
+    private static final String UPLOAD_BUTTON_TOOLTIP_TEXT_DISABLED = "<html>Select a PACS server<br>to enable uploading.</html>";
 
     /** Tool tip for Upload All button. */
-    private static final String ANONYMIZE_BUTTON_TOOLTIP = "<html>AnonymizeGUI this series,<br>overwriting files.</html>";
+    private static final String ANONYMIZE_BUTTON_TOOLTIP = "<html>Anonymize this series,<br>overwriting files.</html>";
 
     /** DICOM value for Patient ID for the series. */
     private String patientID = null;
@@ -114,9 +87,14 @@ public class Series extends JPanel implements ActionListener {
     /** DICOM value for Patient name for the series. */
     private String patientName = null;
 
+    /** Description of series including key metadata values. */
+    private String seriesSummary = null;
+
     /** True if this series has been anonymized. */
     private boolean isAnonymized = false;
 
+    /** True if this series has been anonymized and then uploaded. */
+    private boolean isAnonymizedThenUploaded = false;
 
     /** DICOM value for series number for the series. */
     private String seriesNumber = null;
@@ -125,14 +103,15 @@ public class Series extends JPanel implements ActionListener {
     /** DICOM value for series description for the series. */
     private String seriesDescription = null;
 
+    private static volatile Semaphore processLock = new Semaphore(1);
 
-    /** The next two sets of DICOM values are dates and times.  Frequently,
-     * a DICOM file is generated with one or another date or time field
-     * filled in, but others left vacant.  To get some date and time to
-     * show to the user, several are examined to see if they are present
-     * in the hope that at least one of them is.  This situation is not
-     * ideal (all DICOM files should always have a minimal set of values),
-     * but vendors will do what they will.
+    /**
+     * The next two sets of DICOM values are dates and times. Frequently, a
+     * DICOM file is generated with one or another date or time field filled in,
+     * but others left vacant. To get some date and time to show to the user,
+     * several are examined to see if they are present in the hope that at least
+     * one of them is. This situation is not ideal (all DICOM files should
+     * always have a minimal set of values), but vendors will do what they will.
      */
 
     /** DICOM value for series date for the series. */
@@ -164,14 +143,20 @@ public class Series extends JPanel implements ActionListener {
     /** DICOM value for structure set time for the series. */
     private String seriesInstanceUID = null;
 
-    /** Short human readable description of series constructed from its DICOM values. */
+    /**
+     * Short human readable description of series constructed from its DICOM
+     * values.
+     */
     private JLabel summaryLabel = null;
 
     /** Button that user uses to initiate uploads and anonymization. */
     private JButton uploadAnonymizeButton = null;
 
-    /** Icon associated with upload button to indicate whether or not the series has been uploaded. */ 
-    private JLabel uploadButtonIcon = null;
+    /**
+     * Icon associated with upload button to indicate whether or not the series
+     * has been uploaded, or anonymized, or both.
+     */
+    private JLabel doneIcon = null;
 
     /** Shows preview. */
     private JButton previewButton = null;
@@ -185,83 +170,222 @@ public class Series extends JPanel implements ActionListener {
     /** Layout that shows the progress bar or preview slider. */
     private CardLayout previewProgressLayout = null;
 
+    public static int totalFilesAnonymized = 0;
+
     private class InstanceList {
         private class Instance implements Comparable<Instance> {
-            public final int instanceNumber;
             public String sopInstanceUID;
-            public String fileName;
+            public File file;
+            AttributeList attributeList;
 
-            public Instance(int instanceNumber, String sopInstanceUID, String fileName) {
-                this.instanceNumber = instanceNumber;
-                this.sopInstanceUID = sopInstanceUID;
-                this.fileName = fileName;
+            private int compareString(Instance other, AttributeTag tag) {
+                Attribute thisAttr = attributeList.get(tag);
+                Attribute otherAttr = other.attributeList.get(tag);
+
+                if ((thisAttr == null) && (otherAttr == null)) return 0;
+                if (thisAttr == null) return -1;
+                if (otherAttr == null) return 1;
+
+                String thisVal = thisAttr.getSingleStringValueOrNull();
+                String otherVal = otherAttr.getSingleStringValueOrNull();
+                if ((thisVal == null) && (otherVal == null)) return 0;
+                if (thisVal == null) return -1;
+                if (otherVal == null) return 1;
+
+                return thisVal.compareTo(otherVal);
             }
 
-            @Override
+            private int compareDouble(Instance other, AttributeTag tag, int index) {
+                Attribute thisAttr = attributeList.get(tag);
+                Attribute otherAttr = other.attributeList.get(tag);
+
+                if ((thisAttr == null) && (otherAttr == null)) return 0;
+                if (thisAttr == null) return -1;
+                if (otherAttr == null) return 1;
+
+                try {
+                    double[] thisVal = thisAttr.getDoubleValues();
+                    double[] otherVal = otherAttr.getDoubleValues();
+                    if ((thisVal == null) && (otherVal == null)) return 0;
+                    if (thisVal == null) return -1;
+                    if (otherVal == null) return 1;
+
+                    if ((thisVal.length <= index) && (otherVal.length <= index)) return 0;
+                    if (thisVal.length <= index) return -1;
+                    if (otherVal.length <= index) return 1;
+
+                    double tv = thisVal[index];
+                    double ov = otherVal[index];
+                    if (tv < ov) return -1;
+                    if (tv > ov) return 1;
+                    return 0;
+                    // return Double.compare(tv, ov);
+                }
+                catch (Exception e) {
+                    return 0;
+                }
+            }
+
+            public Instance(String sopInstanceUID, File file, AttributeList attributeList) {
+                this.sopInstanceUID = sopInstanceUID;
+                this.file = file;
+                this.attributeList = attributeList;
+            }
+
             public int compareTo(Instance o) {
-                return this.instanceNumber - o.instanceNumber;
+                int c = 0;
+
+                c = compareDouble(o, TagFromName.SliceLocation, 0);
+                if (c != 0) return c;
+
+                c = compareDouble(o, TagFromName.ImagePositionPatient, 0);
+                if (c != 0) return c;
+
+                c = compareDouble(o, TagFromName.ImagePositionPatient, 1);
+                if (c != 0) return c;
+
+                c = compareDouble(o, TagFromName.ImagePositionPatient, 2);
+                if (c != 0) return c;
+
+                c = compareDouble(o, TagFromName.InstanceNumber, 0);
+                if (c != 0) return c;
+
+                c = compareString(o, TagFromName.InstanceCreationDate);
+                if (c != 0) return c;
+
+                c = compareString(o, TagFromName.InstanceCreationTime);
+                if (c != 0) return c;
+
+                c = compareString(o, TagFromName.InstanceCreationTime);
+                if (c != 0) return c;
+
+                c = compareString(o, TagFromName.AcquisitionDate);
+                if (c != 0) return c;
+
+                c = compareString(o, TagFromName.AcquisitionTime);
+                if (c != 0) return c;
+
+                c = compareString(o, TagFromName.ContentDate);
+                if (c != 0) return c;
+
+                c = compareString(o, TagFromName.ContentTime);
+                if (c != 0) return c;
+
+                c = compareString(o, TagFromName.RTPlanDate);
+                if (c != 0) return c;
+
+                c = compareString(o, TagFromName.RTPlanTime);
+                if (c != 0) return c;
+
+                c = compareString(o, TagFromName.StructureSetDate);
+                if (c != 0) return c;
+
+                c = compareString(o, TagFromName.StructureSetTime);
+                if (c != 0) return c;
+
+                return compareString(o, TagFromName.SOPInstanceUID);
             }
         }
 
-        private ArrayList<Instance> instList = new ArrayList<Instance>();
+        private TreeSet<Instance> instList = new TreeSet<Instance>();
 
         private HashSet<String> sopList = new HashSet<String>();
-        private HashSet<String> fileList = new HashSet<String>();
-        private ArrayList<String> sortedList = null;
+        private HashSet<File> fileList = new HashSet<File>();
 
+        private Semaphore lock = new Semaphore(1);
+
+        private void acquire() {
+            try {
+                if (!lock.tryAcquire(10, TimeUnit.SECONDS)) {
+                    DicomClient.getInstance().showMessage("Failed to acquire internal data lock");
+                }
+            }
+            catch (Exception e) {
+            }
+        }
+
+        private void release() {
+            lock.release();
+        }
 
         /**
-         * Get the sortedList of file names in ascending order by instance number.
+         * Get the sortedList of file names in ascending order by instance
+         * number.
          * 
          * @return List of file names.
          */
-        public ArrayList<String> values() {
-            if (sortedList == null) {
-                Collections.sort(instList);
-                sortedList = new ArrayList<String>();
-                for (Instance inst : instList) {
-                    sortedList.add(inst.fileName);
-                }
+        public ArrayList<File> values() {
+            try {
+                acquire();
+                ArrayList<File> list = new ArrayList<File>();
+                for (Instance inst : instList)
+                    list.add(inst.file);
+                return list;
             }
-            return sortedList;
+            finally {
+                release();
+            }
         }
 
+        public TreeSet<Instance> getList() {
+            return instList;
+        }
 
         public int size() {
-            return instList.size();
+
+            try {
+                acquire();
+
+                return instList.size();
+            }
+            finally {
+                release();
+            }
         }
 
+        public File getFirstFile() {
+            return instList.first().file;
+        }
 
-        public String put(String fileName, AttributeList attributeList) {
-
-            if (fileList.contains(fileName)) {
-                return "The file " + fileName + " has already been loaded.";
+        public File getFile(int i) {
+            try {
+                acquire();
+                return ((Instance) (instList.toArray()[i])).file;
             }
+            finally {
+                release();
+            }
+        }
 
-            String sopInstanceUID = attributeList.get(TagFromName.SOPInstanceUID).getSingleStringValueOrEmptyString();
-            if (sopList.contains(sopInstanceUID)) {
-                String oldFile = "";
-                for (Instance instance : instList) {
-                    if (instance.sopInstanceUID == sopInstanceUID) {
-                        oldFile = instance.fileName;
-                        break;
-                    }
+        private String put(File file, AttributeList attributeList) {
+            try {
+                acquire();
+
+                if (fileList.contains(file)) {
+                    return "The file " + file + " has already been loaded.";
                 }
-                return "The SOP Instance UID " + sopInstanceUID + " was already loaded with from file " + oldFile + ", so ignoring file " + fileName;
+
+                String sopInstanceUID = attributeList.get(TagFromName.SOPInstanceUID).getSingleStringValueOrEmptyString();
+                if (sopList.contains(sopInstanceUID)) {
+                    File oldFile = null;
+                    for (Instance instance : instList) {
+                        if (instance.sopInstanceUID == sopInstanceUID) {
+                            oldFile = instance.file;
+                            break;
+                        }
+                    }
+                    return "The SOP Instance UID " + sopInstanceUID + " was already loaded with from file " + oldFile + ", so ignoring file " + file.getAbsolutePath();
+                }
+
+                instList.add(new Instance(sopInstanceUID, file, attributeList));
+                sopList.add(sopInstanceUID);
+                fileList.add(file);
+
+                return null;
             }
-
-            Attribute instanceNumberAttr = attributeList.get(TagFromName.InstanceNumber);
-            int instanceNumber = 0;
-            if (instanceNumberAttr != null) {
-                instanceNumber = instanceNumberAttr.getSingleIntegerValueOrDefault(0);
+            finally {
+                release();
             }
-
-            instList.add(new Instance(instanceNumber, sopInstanceUID, fileName));
-            sopList.add(sopInstanceUID);
-            fileList.add(fileName);
-            sortedList = null;
-
-            return null;
         }
     }
 
@@ -271,11 +395,38 @@ public class Series extends JPanel implements ActionListener {
     /** List of PACS AE titles to which this series has been uploaded. */
     private HashSet<String> aeTitleUploadList = new HashSet<String>();
 
+    /**
+     * Indicate whether or not the file is in this series.
+     * 
+     * @param file
+     *            File for which to search.
+     * 
+     * @return True if file is in list.
+     */
+    public boolean containsFile(File file) {
+        String path = file.getAbsolutePath();
+        for (File f : instanceList.fileList)
+            if (f.getAbsolutePath().equals(path)) return true;
+        return false;
+    }
+
+    /**
+     * Indicate whether or not the file is already in this series.
+     * 
+     * @param sopInstanceUID
+     *            SOP instance UID to search for
+     * 
+     * @return True if instance is in list.
+     */
+    public boolean containsSOPInstanceUID(String sopInstanceUID) {
+        return instanceList.sopList.contains(sopInstanceUID);
+    }
 
     /**
      * Find the first non-null value in a sortedList.
      * 
-     * @param textList List of values.
+     * @param textList
+     *            List of values.
      * 
      * @return the first non-null value, or null if all are null.
      */
@@ -288,7 +439,6 @@ public class Series extends JPanel implements ActionListener {
         return null;
     }
 
-
     /**
      * Reset the summary label based on the current state of the series.
      */
@@ -297,18 +447,17 @@ public class Series extends JPanel implements ActionListener {
         String time = firstNonNull(new String[] { seriesTime, contentTime, acquisitionTime, instanceCreationTime, rtPlanTime, structureSetTime });
 
         String seriesSummary = "         ";
-        seriesSummary += (seriesNumber == null     ) ? "" : " " + seriesNumber;
-        seriesSummary += (modality == null         ) ? " No modality" : " " + modality;
+        seriesSummary += (seriesNumber == null) ? "" : " " + seriesNumber;
+        seriesSummary += (modality == null) ? " No modality" : " " + modality;
         seriesSummary += (seriesDescription == null) ? "" : " " + seriesDescription;
-        seriesSummary += (date == null             ) ? "" : " " + date;
-        seriesSummary += (time == null             ) ? "" : " " + time;
+        seriesSummary += (date == null) ? "" : " " + date;
+        seriesSummary += (time == null) ? "" : " " + time;
 
         seriesSummary += "    Files: " + instanceList.size();
 
         seriesSummary += "   ";
         summaryLabel.setText(seriesSummary);
     }
-
 
     private JComponent buildPreviewButton() {
         previewButton = new JButton("Preview");
@@ -321,19 +470,17 @@ public class Series extends JPanel implements ActionListener {
         return previewButtonPanel;
     }
 
-
     private JComponent buildUploadAnonymizeButton() {
         uploadAnonymizeButton = new JButton("Upload");
         uploadAnonymizeButton.addActionListener(this);
         uploadAnonymizeButton.setToolTipText("<html>Upload this series to<br>the given PACS server.</html>");
-        uploadButtonIcon = new JLabel(PreDefinedIcons.getEmpty());
+        doneIcon = new JLabel(PreDefinedIcons.getEmpty());
         JPanel uploadButtonPanel = new JPanel();
         uploadButtonPanel.add(uploadAnonymizeButton);
-        uploadButtonPanel.add(uploadButtonIcon);
+        uploadButtonPanel.add(doneIcon);
         uploadButtonPanel.setBorder(BorderFactory.createEmptyBorder(0, 12, 0, 0));
         return uploadButtonPanel;
     }
-
 
     private JComponent buildButtonPanel() {
         JPanel panel = new JPanel();
@@ -341,7 +488,6 @@ public class Series extends JPanel implements ActionListener {
         panel.add(buildUploadAnonymizeButton());
         return panel;
     }
-
 
     private JComponent buildProgressBar() {
         progressBar = new JProgressBar();
@@ -354,7 +500,6 @@ public class Series extends JPanel implements ActionListener {
         return progressPanel;
     }
 
-
     private JComponent buildEast() {
         previewProgressPanel = new JPanel();
         previewProgressLayout = new CardLayout();
@@ -365,13 +510,11 @@ public class Series extends JPanel implements ActionListener {
         return previewProgressPanel;
     }
 
-
     private JComponent buildSummaryLabel() {
         summaryLabel = new JLabel();
         summaryLabel.setFont(DicomClient.FONT_MEDIUM);
         return summaryLabel;
     }
-
 
     private void buildGui() {
         setLayout(new BorderLayout());
@@ -383,55 +526,92 @@ public class Series extends JPanel implements ActionListener {
         setBorder(BorderFactory.createEmptyBorder(gap, gap, gap, 0));
     }
 
-
     /**
-     * Build a GUI component that displays and controls the uploading of a single series.
+     * Build a GUI component that displays and controls the uploading of a
+     * single series.
      * 
-     * @param fileName Name of DICOM file from which the series originated.
+     * @param fileName
+     *            Name of DICOM file from which the series originated.
      * 
-     * @param attributeList Parsed version of DICOM file contents.
+     * @param attributeList
+     *            Parsed version of DICOM file contents.
      */
-    public Series(String fileName, AttributeList attributeList) {
+    public Series(File file, AttributeList attributeList) {
 
-        patientID             = Util.getAttributeValue(attributeList, TagFromName.PatientID);
-        patientID             = (patientID == null) ? "No patient id" : patientID;
-        patientName           = Util.getAttributeValue(attributeList, TagFromName.PatientName);
-        patientName           = (patientName == null) ? "No patient name" : patientName;
+        // For the first file of every series, read the entire attribute
+        // list and then update the anonymizing list. This ensures that
+        // the anonymizing list contains a superset of all attributes used
+        // by the DICOM files that have been loaded. The only problem that
+        // would arise is if a subsequent file in a series contained a
+        // new type of DICOM attribute that was not in the first file of
+        // the series (which is unlikely), and the user wanted to specify
+        // custom anonymization for that type (again, unlikely). The user
+        // could get around this by previewing slice in the series, which
+        // will read each file in it's entirety and update the anonymizing
+        // list. Correcting this error would make the initial loading of
+        // DICOM files much slower (~ 10x), and so would annoy users more than
+        // make them happy. Possibly in the future a background thread will
+        // be started to read each file in its entirety while the user is
+        // staring at the screen, but there's not a big benefit to it.
+        try {
+            AttributeList al = Util.readDicomFile(file);
 
-        modality              = Util.getAttributeValue(attributeList, TagFromName.Modality);
+            if (!DicomClient.hasValidSOPInstanceUID(al)) {
+                // make a new attribute to avoid memory leaks
+                Attribute at = AttributeFactory.newAttribute(TagFromName.SOPInstanceUID);
+                String uid = Util.getAttributeValue(attributeList, TagFromName.SOPInstanceUID);
+                at.addValue(uid);
+                al.put(at);
+            }
+
+            attributeList = al;
+        }
+        catch (Exception e) {
+            Log.get().warning("Error reading DICOM file " + file.getAbsolutePath() + " .  The file may not be processed properly. :  " + e);
+        }
+
+        AnonymizeGUI.getInstance().updateTagList(attributeList);
+
+        patientID = Util.getAttributeValue(attributeList, TagFromName.PatientID);
+        patientID = (patientID == null) ? "No patient id" : patientID;
+        patientName = Util.getAttributeValue(attributeList, TagFromName.PatientName);
+        patientName = (patientName == null) ? "No patient name" : patientName;
+
+        modality = Util.getAttributeValue(attributeList, TagFromName.Modality);
         if (modality == null) {
             modality = SOPClassDescriptions.getAbbreviationFromUID(Util.getAttributeValue(attributeList, TagFromName.MediaStorageSOPClassUID));
         }
-        modality              = (modality == null) ? "No modality" : modality;
-        seriesDescription     = Util.getAttributeValue(attributeList, TagFromName.SeriesDescription);
+        modality = (modality == null) ? "No modality" : modality;
+        seriesDescription = Util.getAttributeValue(attributeList, TagFromName.SeriesDescription);
 
-        // try lots of ways to get the date, because some machines fill in some dates and others fill in others.
-        seriesDate            = Util.getAttributeValue(attributeList, TagFromName.SeriesDate);
-        contentDate           = Util.getAttributeValue(attributeList, TagFromName.ContentDate);
-        acquisitionDate       = Util.getAttributeValue(attributeList, TagFromName.AcquisitionDate);
-        instanceCreationDate  = Util.getAttributeValue(attributeList, TagFromName.InstanceCreationDate);
-        rtPlanDate            = Util.getAttributeValue(attributeList, TagFromName.RTPlanDate);
-        structureSetDate      = Util.getAttributeValue(attributeList, TagFromName.StructureSetDate);
+        // try lots of ways to get the date, because some machines fill in some
+        // dates and others fill in others.
+        seriesDate = Util.getAttributeValue(attributeList, TagFromName.SeriesDate);
+        contentDate = Util.getAttributeValue(attributeList, TagFromName.ContentDate);
+        acquisitionDate = Util.getAttributeValue(attributeList, TagFromName.AcquisitionDate);
+        instanceCreationDate = Util.getAttributeValue(attributeList, TagFromName.InstanceCreationDate);
+        rtPlanDate = Util.getAttributeValue(attributeList, TagFromName.RTPlanDate);
+        structureSetDate = Util.getAttributeValue(attributeList, TagFromName.StructureSetDate);
 
         // try lots of times also.
-        seriesTime            = Util.getAttributeValue(attributeList, TagFromName.SeriesTime);
-        contentTime           = Util.getAttributeValue(attributeList, TagFromName.ContentTime);
-        acquisitionTime       = Util.getAttributeValue(attributeList, TagFromName.AcquisitionTime);
-        instanceCreationTime  = Util.getAttributeValue(attributeList, TagFromName.InstanceCreationTime);
-        rtPlanTime            = Util.getAttributeValue(attributeList, TagFromName.RTPlanTime);
-        structureSetTime      = Util.getAttributeValue(attributeList, TagFromName.StructureSetTime);
+        seriesTime = Util.getAttributeValue(attributeList, TagFromName.SeriesTime);
+        contentTime = Util.getAttributeValue(attributeList, TagFromName.ContentTime);
+        acquisitionTime = Util.getAttributeValue(attributeList, TagFromName.AcquisitionTime);
+        instanceCreationTime = Util.getAttributeValue(attributeList, TagFromName.InstanceCreationTime);
+        rtPlanTime = Util.getAttributeValue(attributeList, TagFromName.RTPlanTime);
+        structureSetTime = Util.getAttributeValue(attributeList, TagFromName.StructureSetTime);
 
-        instanceCreationDate  = Util.getAttributeValue(attributeList, TagFromName.InstanceCreationDate);
-        instanceCreationTime  = Util.getAttributeValue(attributeList, TagFromName.InstanceCreationTime);
-        seriesInstanceUID     = Util.getAttributeValue(attributeList, TagFromName.SeriesInstanceUID);
+        instanceCreationDate = Util.getAttributeValue(attributeList, TagFromName.InstanceCreationDate);
+        instanceCreationTime = Util.getAttributeValue(attributeList, TagFromName.InstanceCreationTime);
+        seriesInstanceUID = Util.getAttributeValue(attributeList, TagFromName.SeriesInstanceUID);
         seriesInstanceUID = (seriesInstanceUID == null) ? "" : seriesInstanceUID;
 
         buildGui();
         resetSummary();
-        addFile(fileName, attributeList);
-        Log.get().info("Added series: " + summaryLabel.getText());
+        addFile(file, attributeList);
+        seriesSummary = getSeriesSummary();
+        Log.get().info("Added series " + seriesSummary);
     }
-
 
     /**
      * Get the currently selected (by the user) AE title.
@@ -441,7 +621,6 @@ public class Series extends JPanel implements ActionListener {
     private String getSelectedAeTitle() {
         return DicomClient.getInstance().getSelectedAeTitle();
     }
-
 
     /**
      * Set the progress bar to zero.
@@ -453,7 +632,8 @@ public class Series extends JPanel implements ActionListener {
     /**
      * Set the progress bar to the given value.
      * 
-     * @param value Value to set the progress bar to.
+     * @param value
+     *            Value to set the progress bar to.
      */
     private void setProgress(int value) {
         previewProgressLayout.show(previewProgressPanel, CARD_PROGRESS);
@@ -462,108 +642,129 @@ public class Series extends JPanel implements ActionListener {
         previewProgressPanel.paintAll(graphics);
     }
 
+    private boolean isBeingPreviewed() {
+        Preview preview = DicomClient.getInstance().getPreview();
+        return (preview.getPreviewedSeries() == this) && (preview.isVisible());
+    }
 
     /**
-     * Set the icon to reflect whether this series has been anonymized or uploaded to
-     * the currently selected PACS.
+     * Set the icon to reflect whether this series has been anonymized or
+     * uploaded to the currently selected PACS.
      * 
      * @return True if it has been uploaded, false if not.
      */
-    public boolean setProcessedStatus() {
-        Color foregroundColor = (DicomClient.getInstance().getPreview().getPreviewedSeries() == this) ? Color.GREEN : DicomClient.COLOR_FONT;
+    public boolean setProcessedStatus(ProcessingMode mode) {
+        Color foregroundColor = isBeingPreviewed() ? Color.GREEN : DicomClient.COLOR_FONT;
         previewButton.setForeground(foregroundColor);
 
-        if (DicomClient.getInstance().getAnonymizeMode()) {
-            uploadButtonIcon.setIcon(isAnonymized ? PreDefinedIcons.getOk() : PreDefinedIcons.getEmpty());
+        switch (mode) {
+        case ANONYMIZE:
+        case ANONYMIZE_THEN_LOAD: {
+            doneIcon.setIcon(isAnonymized ? PreDefinedIcons.getOk() : PreDefinedIcons.getEmpty());
             uploadAnonymizeButton.setToolTipText(ANONYMIZE_BUTTON_TOOLTIP);
             uploadAnonymizeButton.setText("Anonymize");
             uploadAnonymizeButton.setEnabled(true);
-            return false;
+            return isAnonymized;
         }
-        else {
-            String aeTitle = DicomClient.getInstance().getSelectedAeTitle();
-            boolean isUploaded = aeTitleUploadList.contains(aeTitle);
+
+        case UPLOAD: {
+            boolean isUploaded = aeTitleUploadList.contains(DicomClient.getInstance().getSelectedAeTitle());
             Icon icon = isUploaded ? PreDefinedIcons.getOk() : PreDefinedIcons.getEmpty();
-            uploadButtonIcon.setIcon(icon);
+            doneIcon.setIcon(icon);
             boolean enabled = DicomClient.getInstance().uploadEnabled();
             uploadAnonymizeButton.setEnabled(enabled);
             uploadAnonymizeButton.setToolTipText(enabled ? UPLOAD_BUTTON_TOOLTIP_TEXT_ENABLED : UPLOAD_BUTTON_TOOLTIP_TEXT_DISABLED);
             uploadAnonymizeButton.setText("Upload");
             return isUploaded;
         }
+
+        case ANONYMIZE_THEN_UPLOAD: {
+            Icon icon = isAnonymizedThenUploaded ? PreDefinedIcons.getOk() : PreDefinedIcons.getEmpty();
+            doneIcon.setIcon(icon);
+            boolean enabled = DicomClient.getInstance().uploadEnabled();
+            uploadAnonymizeButton.setEnabled(enabled);
+            uploadAnonymizeButton.setToolTipText(enabled ? UPLOAD_BUTTON_TOOLTIP_TEXT_ENABLED : UPLOAD_BUTTON_TOOLTIP_TEXT_DISABLED);
+            uploadAnonymizeButton.setText("Anonymize then Upload");
+            return isAnonymizedThenUploaded;
+        }
+        }
+        return false;
     }
 
-
     /**
-     * Upload the given stream to the current PACS.
+     * Upload the given list of attribute lists to the current PACS.
      * 
-     * @param urlText DICOM service URL.
+     * @param description
+     *            Description of this series.
      * 
-     * @param seriesSummary Description of this series.
-     * 
-     * @param inputStream Stream containing content to upload.
+     * @param attrListList
+     *            Content to upload.
      * 
      * @return True on success.
      */
-    private static boolean uploadStream(String urlText, String seriesSummary, InputStream inputStream) {
-        boolean ok = false;
-        Response response = null;
+    private void pushDicom(SetOfDicomFiles setOfDicomFiles) {
         try {
-            Client client = new Client(Protocol.HTTPS);
-            Request request = new Request(Method.PUT, new Reference(urlText));
-            DicomClient.getInstance().setChallengeResponse(request);
-            Representation representation = new InputRepresentation(inputStream, MediaType.APPLICATION_OCTET_STREAM);
-            request.setEntity(representation);
-            request.setMethod(Method.PUT);
-            response = client.handle(request);
-            representation.release();
-            Status status = response.getStatus();
-
-            if (status.equals(Status.SUCCESS_OK)) {
-                ok = true;
-            }
-            else {
-                String message =
-                    "Problem uploading series " + seriesSummary + ".  Remaining uploads for this series are being aborted.\n" +
-                    "    Server status: " + status + " : " + response.getEntityAsText();
+            processLock.acquireUninterruptibly();
+            PACS pacs = DicomClient.getInstance().getCurrentPacs();
+            DicomPush dicomPush = new DicomPush(pacs, setOfDicomFiles, null);
+            String pushError = dicomPush.push();
+            if (pushError != null) {
+                processOk = false;
+                String message = "Problem uploading files for " + seriesSummary + " : " + pushError;
+                Log.get().warning(message);
                 DicomClient.getInstance().showMessage(message);
+                new Alert(message, "Upload Error");
             }
-        }
-        catch (ResourceException ex) {
-            String message =
-                "Problem uploading series " + seriesSummary + " to " + urlText + " .  Remaining uploads for this series are being aborted. : " + ex;
-            if (response != null) {
-                message += "\n    Server status: " + response.getStatus() + " : " + response.getEntityAsText();
-            }
-            DicomClient.getInstance().showMessage(message);
-            Log.get().severe(message);
+            return;
         }
         catch (Exception e) {
-            String message =
-                "Unexpected problem while uploading series " + seriesSummary + " to " + urlText + ".  Remaining uploads for this series are being aborted." + e;
-            if (response != null) {
-                message += "\n    Server status: " + response.getStatus() + " : " + response.getEntityAsText();
-            }
+            String message = "Problem uploading series " + seriesSummary + " . Remaining uploads for this series are being aborted.  Exception: " + e;
             DicomClient.getInstance().showMessage(message);
-            Log.get().severe(message);
         }
-        return ok;
+        finally {
+            processLock.release();
+        }
+        processOk = false;
     }
 
-
-    /**
-     * Perform either anonymization or upload on this series depending on the mode.
-     */
-    public void processSeries() {
-        if (DicomClient.getInstance().getAnonymizeMode()) {
+    public void run() {
+        processOk = true;
+        switch (DicomClient.getInstance().getProcessingMode()) {
+        case ANONYMIZE:
             anonymizeSeries();
-        }
-        else {
+            break;
+        case ANONYMIZE_THEN_LOAD:
+            anonymizeSeries();
+            break;
+        case UPLOAD:
             uploadSeries();
+            break;
+        case ANONYMIZE_THEN_UPLOAD:
+            Log.get().info("Anonymizing and uploading series " + summaryLabel.getText() + " : " + seriesInstanceUID);
+            ArrayList<File> filesCreated = anonymizeSeries();
+            uploadFiles(filesCreated);
+            isAnonymizedThenUploaded = true;
+            break;
         }
+        DicomClient.getInstance().markScreenAsModified();
         DicomClient.getInstance().setProcessedStatus();
     }
 
+    /**
+     * Perform either anonymization or upload on this series depending on the
+     * mode.
+     */
+    public void processSeries() {
+        if (!processOk) return;
+        if (DicomClient.inCommandLineMode()) {
+            run();
+        }
+        else {
+            Thread thread = new Thread(this);
+            thread.start();
+        }
+        DicomClient.getInstance().markScreenAsModified();
+    }
 
     /**
      * Get the patient object containing this series.
@@ -575,19 +776,19 @@ public class Series extends JPanel implements ActionListener {
         while (!(pat instanceof Patient)) {
             pat = pat.getParent();
         }
-        return (Patient)pat;
+        return (Patient) pat;
     }
-
 
     /**
      * Get the sortedList of anonymization values for this series.
      * 
      * @return The sortedList of anonymization values for this series.
      * 
-     * @throws DicomException On invalid PatientID or PatientName
+     * @throws DicomException
+     *             On invalid PatientID or PatientName
      */
-    private synchronized AttributeList getAnonymizingReplacementList() throws DicomException {
-        AttributeList replacementAttributeList = DicomClient.getInstance().getAnonymizeGui().getAttributeList();
+    public synchronized AttributeList getAnonymizingReplacementList() throws DicomException {
+        AttributeList replacementAttributeList = AnonymizeGUI.getInstance().getAttributeList();
 
         Attribute patientId = AttributeFactory.newAttribute(TagFromName.PatientID);
         patientId.addValue(getPatient().getAnonymizePatientIdText());
@@ -600,286 +801,310 @@ public class Series extends JPanel implements ActionListener {
         return replacementAttributeList;
     }
 
-
-    /**
-     * Get an anonymized name for the file.
-     * 
-     * @param attributeList
-     * 
-     * @return
-     */
-    private File getNewFileName(File dir, AttributeList attributeList) {
-
-        if ((DicomClient.inCommandLineMode()) && (DicomClient.getOutputFile() != null)) {
-            if (DicomClient.getInstance().getFileCount() > 1) {
-                dir = DicomClient.getOutputFile();
-            }
-            else {
-                return DicomClient.getOutputFile();
-            }
-        }
-
-        String patientIdText      = Util.getAttributeValue(attributeList, TagFromName.PatientID);
-        String modalityText       = Util.getAttributeValue(attributeList, TagFromName.Modality);
-        String seriesNumberText   = Util.getAttributeValue(attributeList, TagFromName.SeriesNumber);
-        String instanceNumberText = Util.getAttributeValue(attributeList, TagFromName.InstanceNumber);
-
-        while ((instanceNumberText != null) && (instanceNumberText.length() < 4)) {
-            instanceNumberText = "0" + instanceNumberText;
-        }
-
-        String name = "";
-        name += (patientIdText      == null) ? "" : patientIdText;
-        name += (modalityText       == null) ? "" : ("_" + modalityText);
-        name += (seriesNumberText   == null) ? "" : ("_" + seriesNumberText);
-        name += (instanceNumberText == null) ? "" : ("_" + instanceNumberText);
-
-        name = name.replace(' ', '_');
-
-        File file = new File(dir, name + DICOM_SUFFIX);
-        int count = 1;
-        while (file.exists()) {
-            file = new File(dir, name + "_" + count + DICOM_SUFFIX);
-            count++;
-        }
-
-        if (!dir.exists()) {
-            dir.mkdirs();
-        }
-        return file;
-    }
-
-
     /**
      * If in command line mode, save the anonymized DICOM as text and, if
      * possible, as an image.
      * 
-     * @param attributeList Anonymized DICOM.
+     * @param attributeList
+     *            Anonymized DICOM.
      * 
-     * @param file File where anonymized DICOM is to be written.
+     * @param file
+     *            File where anonymized DICOM is to be written.
      */
     private void saveTextAndXmlAndImageFiles(AttributeList attributeList, File file) {
-        if (DicomClient.inCommandLineMode()) {
-            StringBuffer text = new StringBuffer();
-            DicomClient.getInstance().getPreview().addTextAttributes(attributeList, text, 0);
-            String fileName = file.getName();
-            String textFileName = null;
-            String imageFileName = null;
-            String xmlFileName = null;
-            File dir = (file.getParentFile() == null) ? new File(".") : file.getParentFile();
-            int dotIndex = fileName.lastIndexOf('.');
-            if (dotIndex == -1) {
-                textFileName = fileName + ".TXT";
-                imageFileName = fileName + ".PNG";
-                xmlFileName = fileName + ".XML";
-            }
-            else {
-                String baseName = fileName.substring(0, dotIndex);
-                textFileName = baseName + ".TXT";
-                imageFileName = baseName + ".PNG";
-                xmlFileName = baseName + ".XML";
-            }
+        String fileName = file.getName();
+        String textFileName = null;
+        String imageFileName = null;
+        String xmlFileName = null;
+        File dir = (file.getParentFile() == null) ? new File(".") : file.getParentFile();
+        int dotIndex = fileName.lastIndexOf('.');
+        if (dotIndex == -1) {
+            textFileName = fileName + Util.TEXT_SUFFIX;
+            imageFileName = fileName + Util.PNG_SUFFIX;
+            xmlFileName = fileName + Util.XML_SUFFIX;
+        }
+        else {
+            String baseName = fileName.substring(0, dotIndex);
+            textFileName = baseName + Util.TEXT_SUFFIX;
+            imageFileName = baseName + Util.PNG_SUFFIX;
+            xmlFileName = baseName + Util.XML_SUFFIX;
+        }
 
-            File textFile = new File(dir, textFileName);
-            try {
-                textFile.delete();
-                textFile.createNewFile();
-                Utility.writeFile(textFile, text.toString().getBytes());
-            }
-            catch (UMROException e) {
-                System.err.println("Unable to write anonymized text file: " + e);
-                e.printStackTrace();
-            }
-            catch (IOException e) {
-                System.err.println("Unable to create anonymized text file " + textFile.getAbsolutePath() + " : " + e);
-                e.printStackTrace();
-            }
+        File textFile = new File(dir, textFileName);
+        Log.get().info("Writing text file: " + textFile.getAbsolutePath());
+        try {
+            Util.writeTextFile(attributeList, textFile);
+        }
+        catch (UMROException e) {
+            System.err.println("Unable to write anonymized text file: " + Log.fmtEx(e));
+        }
+        catch (IOException e) {
+            System.err.println("Unable to create anonymized text file " + textFile.getAbsolutePath() + " : " + Log.fmtEx(e));
+        }
 
-            try {
-                BufferedImage image = ConsumerFormatImageMaker.makeEightBitImage(attributeList, 0);
-                File imageFile = new File(dir, imageFileName);
-                try {
-                    ImageIO.write(image, "png", imageFile);
-                }
-                catch (IOException e) {
-                    Log.get().warning("Unable to write image file as part of anonymization for file " + imageFile.getAbsolutePath());
-                }
-            }
-            catch (DicomException e) {
-                // Ignore exception because this was not an image file.
-            }
+        File imageFile = new File(dir, imageFileName);
+        try {
+            Log.get().info("Writing PNG file: " + imageFile.getAbsolutePath());
+            Util.writePngFile(attributeList, imageFile);
+        }
+        catch (Exception e) {
+            Log.get().warning("Unable to write image file as part of anonymization for file " + imageFile.getAbsolutePath() + " : " + Log.fmtEx(e));
+        }
 
-
-            try {
-                Document document = new XMLRepresentationOfDicomObjectFactory().getDocument(attributeList);
-                if (DicomClient.getReplaceControlCharacters()) {
-                    XML.replaceControlCharacters(document, ' ');
-                }
-                String xmlText = XML.domToString(document);
-                Utility.writeFile(new File(dir, xmlFileName), xmlText.getBytes());
-            }
-            catch (ParserConfigurationException e) {
-                System.err.println("Unable to parse anonymized DICOM as XML: " + e);
-                e.printStackTrace();
-            }
-            catch (UMROException e) {
-                System.err.println("Unable to write anonymized XML file: " + e);
-                e.printStackTrace();
-            }
-
+        File xmlFile = new File(dir, xmlFileName);
+        try {
+            Log.get().info("Writing XML file: " + xmlFile.getAbsolutePath());
+            Util.writeXmlFile(attributeList, xmlFile);
+        }
+        catch (ParserConfigurationException e) {
+            System.err.println("Unable to parse anonymized DICOM file " + xmlFile.getAbsolutePath() + " as XML: " + Log.fmtEx(e));
+        }
+        catch (Exception e) {
+            System.err.println("Unable to write anonymized " + xmlFile.getAbsolutePath() + " XML file: " + Log.fmtEx(e));
         }
     }
-
 
     /**
      * AnonymizeGUI this series and write the results to new files.
      */
-    private void anonymizeSeries() {
-        File newDir = DicomClient.getInstance().getDestination();
-        File newFile = null;
-        int count = 0;
-        int tries = 0;
+    private synchronized ArrayList<File> anonymizeSeries() {
+        ArrayList<File> filesCreated = new ArrayList<File>();
         try {
-            for (String fileName : instanceList.values()) {
-                tries++;
-                CustomAttributeList attributeList = new CustomAttributeList();
-                attributeList.read(fileName);
+            processLock.acquireUninterruptibly();
+            if (!processOk) return filesCreated;
+            File newFile = null;
+            int count = 0;
+            int tries = 0;
+            try {
+                previewProgressLayout.show(previewProgressPanel, CARD_PROGRESS);
+                zeroProgressBar();
+                File seriesOutDir = null;
+                for (InstanceList.Instance instance : instanceList.getList()) {
+                    tries++;
+                    AttributeList attributeList = Util.readDicomFile(instance.file);
+                    if (!DicomClient.hasValidSOPInstanceUID(attributeList)) {
+                        attributeList.put(instance.attributeList.get(TagFromName.SOPInstanceUID));
+                    }
 
-                //DicomClient.getInstance().getAnonymize().anonymizeAttributeList(attributeList);
-                Anonymize.anonymize(attributeList, getAnonymizingReplacementList());
-                FileMetaInformation.addFileMetaInformation(attributeList, Util.DEFAULT_TRANSFER_SYNTAX, "DICOMService");
+                    // ensure that all types of attributes that will be
+                    // encountered have already been initialized for
+                    // anonymization
+                    AnonymizeGUI.getInstance().updateTagList(attributeList);
 
-                // set up to put file in new directory
-                newFile = getNewFileName(newDir, attributeList);
-                File parent = (newFile.getParentFile() == null) ? new File(".") : newFile.getParentFile();
-                parent.mkdirs();
-                attributeList.write(newFile, Util.DEFAULT_TRANSFER_SYNTAX, true, true);
-                saveTextAndXmlAndImageFiles(attributeList, newFile);
-                count++;
-                Log.get().info("Anonymized to file: " + newFile.getAbsolutePath());
+                    // do the actual anonymization
+                    Anonymize.anonymize(attributeList, getAnonymizingReplacementList());
+
+                    // Indicate that the file was touched by this application. Also a subtle way to advertise. :)
+                    FileMetaInformation.addFileMetaInformation(attributeList, Util.DEFAULT_TRANSFER_SYNTAX, ClientConfig.getInstance().getApplicationName());
+
+                    if (DicomClient.inCommandLineMode()) {
+                        if (DicomClient.getInstance().getCommandParameterOutputFile() != null) {
+                            newFile = DicomClient.getInstance().getCommandParameterOutputFile();
+                        }
+                        else {
+                            newFile = DicomClient.getAvailableFile(attributeList, Util.DICOM_SUFFIX, seriesOutDir, instance.file);
+                            seriesOutDir = newFile.getParentFile();
+                        }
+                        newFile.getParentFile().mkdirs();
+                        attributeList.write(newFile, Util.DEFAULT_TRANSFER_SYNTAX, true, true);
+                        saveTextAndXmlAndImageFiles(attributeList, newFile);
+                    }
+                    else {
+                        ArrayList<String> suffixList = new ArrayList<String>();
+                        suffixList.add(Util.DICOM_SUFFIX);
+                        newFile = DicomClient.getAvailableFile(attributeList, Util.DICOM_SUFFIX, seriesOutDir, instance.file);
+                        seriesOutDir = newFile.getParentFile();
+                        newFile.getParentFile().mkdirs();
+                        attributeList.write(newFile, Util.DEFAULT_TRANSFER_SYNTAX, true, true);
+                        // load the anonymized file automatically
+                        if (DicomClient.getInstance().getProcessingMode() == ProcessingMode.ANONYMIZE_THEN_LOAD) {
+                            DicomClient.getInstance().addDicomFile(newFile, false);
+                        }
+                        filesCreated.add(newFile);
+                    }
+
+                    totalFilesAnonymized++;
+                    DicomClient.getInstance().indicateThatStatisticsHaveChanged();
+
+                    count++;
+                    setProgress(count);
+                    Log.get().info("Anonymized to file: " + newFile.getAbsolutePath());
+                    DicomClient.getInstance().markScreenAsModified();
+                }
+            }
+            catch (DicomException e) {
+                String msg = "DICOM error - unable to anonymize series : " + e;
+                DicomClient.getInstance().showMessage(msg);
+                Log.get().severe(msg);
+                processOk = false;
+                if (DicomClient.inCommandLineMode()) {
+                    System.err.println(msg);
+                    Util.exitFail();
+                }
+            }
+            catch (IOException e) {
+                processOk = false;
+                String msg = "File error - unable to anonymize series : " + e;
+                DicomClient.getInstance().showMessage(msg);
+                Log.get().severe(msg);
+                // If there was an IO exception, then
+                if (tries == 1) { // only tell user once per series
+                    String ioMsg = "<html>Unable to write file\n\n    " + newFile.getAbsolutePath()
+                            + "\n<p><br><p>It is possible that you do not have permission to write to this directory." + "\n<p><br><p>Technical details:<br>" + e + "\n</html>";
+                    new Alert(ioMsg, "Unable to write file");
+                }
+                if (DicomClient.inCommandLineMode()) {
+                    System.err.println(msg);
+                    Util.exitFail();
+                }
+            }
+            finally {
+                previewProgressLayout.show(previewProgressPanel, CARD_SLIDER);
+            }
+            if (count == instanceList.size()) {
+                isAnonymized = true;
+                setProcessedStatus(DicomClient.getInstance().getProcessingMode());
+            }
+            else {
+                String msg = "Unable to anonymize series " + toString() + " .  Only " + count + " slices of " + instanceList.size() + " were completed.";
+                DicomClient.getInstance().showMessage(msg);
             }
         }
-        catch (DicomException e) {
-            String msg = "DICOM error - unable to anonymize series " + toString() + " : " + e;
-            DicomClient.getInstance().showMessage(msg);
-            Log.get().severe(msg);
-            if (DicomClient.inCommandLineMode()) {
-                System.err.println(msg);
-                System.exit(1);
-            }
+        finally {
+            processLock.release();
         }
-        catch (IOException e) {
-            String msg = "File error - unable to anonymize series " + toString() + " : " + e;
-            DicomClient.getInstance().showMessage(msg);
-            Log.get().severe(msg);
-            // If there was an IO exception, then
-            if (tries == 1) { // only tell user once per series
-                String ioMsg =
-                    "<html>Unable to write file\n\n    " + newFile.getAbsolutePath() +
-                    "\n<p><br><p>It is possible that you do not have permission to write to this directory." +
-                    "\n<p><br><p>Technical details:<br>" + e + "\n</html>";
-                new Alert(ioMsg, "Unable to write file");
-            }
-            if (DicomClient.inCommandLineMode()) {
-                System.err.println(msg);
-                System.exit(1);
-            }
-        }
-        if (count == instanceList.size()) {
-            isAnonymized = true;
-            setProcessedStatus();
-        }
-        else {
-            String msg = "Unable to anonymize series " + toString() + " .  Only " + count + " slices of " + instanceList.size() + " were completed.";
-            DicomClient.getInstance().showMessage(msg);
-        }
+        return filesCreated;
     }
 
+    private String getSeriesSummary() {
+        seriesSummary = "";
+        seriesSummary += (patientID == null) ? "" : " " + patientID;
+        seriesSummary += (patientName == null) ? "" : " " + patientName;
+        seriesSummary += (seriesNumber == null) ? "" : " " + seriesNumber;
+        seriesSummary += (modality == null) ? "" : " " + modality;
+        seriesSummary += (seriesDescription == null) ? "" : " " + seriesDescription;
+        return seriesSummary;
+    }
+
+    private void uploadFiles(ArrayList<File> fileList) {
+        int fileIndex = 0;
+
+        /*
+         * AttributeList[] tempList = new AttributeList[fileList.size()];
+         * while ((fileIndex < fileList.size()) && (processOk)) {
+         * int f = 0;
+         * while ((fileIndex < fileList.size()) && processOk && (f < UPLOAD_BUFFER_SIZE)) {
+         * File file = fileList.get(fileIndex);
+         * AttributeList attributeList = new CustomAttributeList();
+         * try {
+         * attributeList = Util.readDicomFile(file);
+         * }
+         * catch (Exception e) {
+         * String msg = seriesSummary + " Unable to read DICOM file " + file.getAbsolutePath() + " : " + e;
+         * Log.get().warning(msg);
+         * DicomClient.getInstance().showMessage(msg);
+         * new Alert(msg, "Upload Failure");
+         * processOk = false;
+         * return;
+         * }
+         * tempList[f] = attributeList;
+         * f++;
+         * fileIndex++;
+         * }
+         * AttributeList[] attrListList = null;
+         * if (tempList.length == f)
+         * attrListList = tempList;
+         * else {
+         * attrListList = new AttributeList[f];
+         * for (int ff = 0; ff < f; ff++)
+         * attrListList[ff] = tempList[ff];
+         * }
+         */
+
+        String failText = "";
+        int failCount = 0;
+        SetOfDicomFiles setOfDicomFiles = new SetOfDicomFiles();
+        for (File file : fileList) {
+            try {
+                setOfDicomFiles.add(file);
+            }
+            catch (IOException e) {
+                failCount++;
+                String message = "Unable to read file " + file.getAbsolutePath() + " : " + e + "\n";
+                failText += message;
+                Log.get().warning(message);
+            }
+        }
+        if (failCount > 0) {
+            String msg = "While uploading, " + failCount + " files out of " + fileList.size() +
+                    " failed to upload.  Details below.\n\n" + failText;
+            new Alert(msg, "Upload Failure");
+        }
+
+        if (!setOfDicomFiles.isEmpty()) {
+            pushDicom(setOfDicomFiles);
+            if (processOk) {
+                Log.get().info("Uploaded file to PACS " + getSelectedAeTitle());
+                setProgress(fileIndex);
+                DicomClient.getInstance().incrementUploadCount(setOfDicomFiles.size());
+            }
+        }
+
+        if (processOk) {
+            aeTitleUploadList.add(getSelectedAeTitle());
+            DicomClient.getInstance().setProcessedStatus();
+        }
+        previewProgressLayout.show(previewProgressPanel, CARD_SLIDER);
+    }
 
     /**
-     * Upload the entire series to the currently selected PACS.  If any of the files
-     * in the series have a problem uploading, then fail with a message to the user.
-     * If the entire upload succeeds, then mark the series as uploaded.
+     * Upload the entire series to the currently selected PACS. If any of the
+     * files in the series have a problem uploading, then fail with a message to
+     * the user. If the entire upload succeeds, then mark the series as
+     * uploaded.
      */
     private void uploadSeries() {
+        if (!processOk) return;
         String aeTitle = getSelectedAeTitle();
-        String urlText = ClientConfig.getInstance().getServerBaseUrl();
         zeroProgressBar();
-        int fileIndex = 0;
         if (aeTitle == null) {
             String message = "No valid PACS selected.";
             Log.get().warning(message);
             DicomClient.getInstance().showMessage(message);
             return;
         }
-        if (urlText != null) {
-            try {
-                urlText += "/dicom/put?pacs=" + aeTitle + "&user_id=" + DicomClient.getInstance().getLoginName();
-                Log.get().info("Starting upload of " + instanceList.size() + " file(s) from series " + summaryLabel.getText() + " to PACS " + aeTitle + " using base url: " + urlText);
-                String seriesSummary = "";
-                seriesSummary += (patientID         == null) ? "" : " " + patientID;
-                seriesSummary += (patientName       == null) ? "" : " " + patientName;
-                seriesSummary += (seriesNumber      == null) ? "" : " " + seriesNumber;
-                seriesSummary += (modality          == null) ? "" : " " + modality;
-                seriesSummary += (seriesDescription == null) ? "" : " " + seriesDescription;
+        try {
+            Log.get().info("Starting upload of " + seriesSummary);
 
-                try {
-                    KeyObject keyObject = new KeyObject(seriesSummary, instanceList.values());
-                    ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
-                    DicomOutputStream dicomOutputStream = new DicomOutputStream(byteArrayOutputStream, Util.DEFAULT_STORAGE_SYNTAX, TransferSyntax.ExplicitVRLittleEndian);
-                    keyObject.write(dicomOutputStream);
-                    ByteArrayInputStream byteArrayInputStream = new ByteArrayInputStream(byteArrayOutputStream.toByteArray());
-                    if (!uploadStream(urlText, seriesSummary, byteArrayInputStream)) {
-                        String msg = "Could not upload Key Object file for series " + seriesSummary;
-                        Log.get().info(msg);
-                        DicomClient.getInstance().showMessage(msg);
-                        return;
-                    }
-                }
-                catch (Exception e) {
-                    Log.get().info("Upload failed.  Could not generate Key Object File for series " + seriesSummary + " : " + e);
-                    return;
-                }
-
-                for (String fileName : instanceList.values()) {
-                    InputStream inputStream = null;
-                    try {
-                        inputStream = new FileInputStream(new File(fileName));
-                    }
-                    catch (FileNotFoundException e) {
-                        Log.get().severe("Unable to upload file " + fileName + " . Was it deleted, renamed, or moved?   Error: " + e);
-                    }
-
-                    if (uploadStream(urlText, seriesSummary, inputStream)) {
-                        fileIndex++;
-                        Log.get().info("Uploaded file " + fileName + " from series " + seriesSummary + " to PACS " + aeTitle);
-                        setProgress(fileIndex);
-                        DicomClient.getInstance().incrementUploadCount();
-                    }
-                    else {
-                        return;
-                    }
-                }
-                aeTitleUploadList.add(aeTitle);
-                DicomClient.getInstance().setProcessedStatus();
+            ArrayList<File> fileList = new ArrayList<File>();
+            for (int f = 0; f < instanceList.size(); f++) {
+                fileList.add(instanceList.getFile(f));
+                DicomClient.getInstance().markScreenAsModified();
             }
-            finally {
-                previewProgressLayout.show(previewProgressPanel, CARD_SLIDER);
-            }
+
+            uploadFiles(fileList);
         }
-        Log.get().info("Uploaded " + fileIndex + " of " + instanceList.size() + " files.");
+        catch (Exception e) {
+            Log.get().severe("Unexpected error in edu.umro.dicom.client.Series.uploadSeries: " + Log.fmtEx(e));
+        }
+        finally {
+            previewProgressLayout.show(previewProgressPanel, CARD_SLIDER);
+            DicomClient.getInstance().markScreenAsModified();
+        }
     }
-
 
     /**
      * Add the given file to this series.
      * 
-     * @param fileName The file to add.
+     * @param fileName
+     *            The file to add.
      * 
-     * @param attributeList Parsed version of the DICOM file contents.
+     * @param attributeList
+     *            Parsed version of the DICOM file contents.
      */
-    public void addFile(String fileName, AttributeList attributeList) {
-        String msg = instanceList.put(fileName, attributeList);
+    public void addFile(File file, AttributeList attributeList) {
+        AnonymizeGUI.getInstance().updateTagList(attributeList);
+        String msg = instanceList.put(file, attributeList);
         progressBar.setMaximum(instanceList.size());
         if (msg == null) {
             resetSummary();
@@ -887,8 +1112,13 @@ public class Series extends JPanel implements ActionListener {
         else {
             DicomClient.getInstance().showMessage(msg);
         }
+        if (DicomClient.getInstance().getPreview().getPreviewedSeries() == this) {
+            int sliceNumber = instanceList.size() / 2;
+            sliceNumber = (sliceNumber < 1) ? 1 : sliceNumber;
+            showPreview(sliceNumber);
+        }
+        DicomClient.getInstance().indicateThatStatisticsHaveChanged();
     }
-
 
     /**
      * Get the series instance UID.
@@ -899,20 +1129,27 @@ public class Series extends JPanel implements ActionListener {
         return seriesInstanceUID;
     }
 
-
     /**
-     * Determine if this series is equal to another.  Two series are
-     * considered equal if they have the same series instance UID.
+     * Determine if this series is equal to another. Two series are considered
+     * equal if they have the same series instance UID.
      */
     public boolean equals(Object other) {
-        return (other instanceof Series) && seriesInstanceUID.equals(((Series)other).seriesInstanceUID);
+        return (other instanceof Series) && seriesInstanceUID.equals(((Series) other).seriesInstanceUID);
     }
 
+    public static volatile boolean processOk = true;
 
-    @Override
     public void actionPerformed(ActionEvent ev) {
+        processOk = true;
         if (ev.getSource() == uploadAnonymizeButton) {
-            if (DicomClient.getInstance().ensureAnonymizeDirectoryExists()) processSeries();
+            if (DicomClient.getInstance().getProcessingMode() != ProcessingMode.UPLOAD) {
+                if (DicomClient.getInstance().ensureAnonymizeDirectoryExists()) {
+                    processSeries();
+                }
+            }
+            else {
+                processSeries();
+            }
         }
 
         if (ev.getSource() == previewButton) {
@@ -920,52 +1157,78 @@ public class Series extends JPanel implements ActionListener {
             slice = (slice < 1) ? 1 : slice;
             showPreview(slice);
         }
+        DicomClient.getInstance().markScreenAsModified();
     }
-
 
     @Override
     public String toString() {
         return summaryLabel.getText();
     }
 
-    private volatile boolean inPreview = false;
+    /**
+     * Get the title to be displayed on the preview window.
+     * 
+     * @param sliceNumber
+     *            Current slice being displayed.
+     * 
+     * @return Orienting description of preview.
+     */
+    public String getPreviewTitle(int sliceNumber) {
+        return getDescription() + "   " + sliceNumber + " / " + instanceList.size();
+    }
+
+    /**
+     * Get a description of this series.
+     * 
+     * @return A description of this series.
+     */
+    public String getDescription() {
+        StringBuffer title = new StringBuffer();
+
+        title.append((patientID == null) ? "" : "  " + patientID);
+        title.append((patientName == null) ? "" : "  " + patientName);
+        title.append((seriesNumber == null) ? "" : "  " + seriesNumber);
+        title.append((modality == null) ? "" : "  " + modality);
+        title.append((seriesDescription == null) ? "" : "  " + seriesDescription);
+        return title.toString();
+    }
 
     /**
      * Show the current slice in the previewer.
      */
-    public synchronized void showPreview(int value) {
-        if (!inPreview) {
-            inPreview = true;
-            try {
-                Preview preview = DicomClient.getInstance().getPreview();
-                preview.setSeries(this);
-
-                String fileName = instanceList.values().get(value-1);
-                StringBuffer title = new StringBuffer();
-
-                title.append((patientID         == null) ? "" : "  " + patientID);
-                title.append((patientName       == null) ? "" : "  " + patientName);
-                title.append((seriesNumber      == null) ? "" : "  " + seriesNumber);
-                title.append((modality          == null) ? "" : "  " + modality);
-                title.append((seriesDescription == null) ? "" : "  " + seriesDescription);
-                title.append("   " + value + " / " + instanceList.size());
-
-                preview.showDicom(title.toString(), fileName);
-            }
-            finally {
-                inPreview = false;
-            }
-        }
+    public synchronized void showPreview(int sliceNumber) {
+        Preview preview = DicomClient.getInstance().getPreview();
+        File file = instanceList.values().get(sliceNumber - 1);
+        preview.showDicom(this, getPreviewTitle(sliceNumber), sliceNumber, getFileList().size(), file);
     }
-
 
     /**
      * Get the sortedList of file names.
      * 
      * @return List of file names.
      */
-    public Collection<String> getFileNameList() {
+    public Collection<File> getFileList() {
         return instanceList.values();
     }
 
+    public int getFileCount() {
+        return instanceList.size();
+    }
+
+    /**
+     * Get the directory where series is stored.
+     * 
+     * @return Directory where series is stored.
+     */
+    public File getDirectory() {
+        return instanceList.getFirstFile().getParentFile();
+    }
+
+    /**
+     * Support for testing.
+     */
+    @AutoTest
+    public void doClickPreviewButtonTest() {
+        previewButton.doClick();
+    }
 }
